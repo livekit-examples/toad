@@ -45,7 +45,7 @@ export function SessionView({ onFatalError }: SessionViewProps) {
   }, [agent.state, agent.failureReasons, onFatalError, session]);
 
   return (
-    <main className="mx-auto flex h-dvh w-full max-w-3xl flex-col">
+    <main className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
       <header className="flex items-center gap-4 border-b border-border px-4 py-3">
         <BarVisualizer
           state={agent.state}

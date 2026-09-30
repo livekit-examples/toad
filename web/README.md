@@ -14,6 +14,20 @@ You can prompt the agent to do tasks either way, and the conversation is shown a
   messages (`useSessionMessages`), a text box, and a mic toggle. Typed messages go to the agent on the
   standard `lk.chat` text stream topic. The agent's replies arrive as transcriptions.
 
+## Inbox
+
+The **Inbox** tab lists work and decisions from the Iris backend. It polls
+`GET /snapshot?after_event_id=N` every second and lets you approve, edit or deny a proposed tracker
+comment (`POST /approvals/{id}/decision` and `POST /approvals/{id}/revisions`).
+
+- `src/lib/iris/types.ts` holds **provisional** wire types; replace it with Dev B's generated types.
+- `src/lib/iris/client.ts` is the only code that calls the backend. Set `NEXT_PUBLIC_IRIS_API_URL`
+  to switch from fixtures to the real backend.
+- Until then, `src/app/api/mock/` serves the same routes from `src/lib/iris/fixtures.ts` (the seeded
+  TOAD-142 story plus one approval in every state). It enforces revision/digest conflicts and
+  simulates approve → executing → posted. The UI marks this as "Fixture data", and "Reset fixtures"
+  restores the seed.
+
 ## Setup
 
 ```bash
