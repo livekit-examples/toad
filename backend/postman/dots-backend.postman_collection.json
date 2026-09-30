@@ -1,0 +1,1825 @@
+{
+  "info": {
+    "name": "Dots on LiveKit Backend",
+    "description": "Postman collection for the **Dots on LiveKit** Python/FastAPI backend (`backend/`), built from `docs/superpowers/plans/2026-09-30-dots-backend.md`.\n\n## Setup\n1. `cd backend && docker compose up -d postgres && uv run alembic upgrade head && uv run python scripts/seed.py`\n2. `uv run uvicorn dots_backend.main:app --reload` (API on :8000)\n3. Optional: `DISPATCH_MODE=fake uv run python -m dots_backend.worker` so tasks move QUEUED \u2192 RUNNING.\n4. Import the `Dots Local` environment, then run **Agent API \u2192 Get user context by phone** first. It saves `userId` for every other request.\n\n## Auth\n- `/agent/*` (used by the `dot` and `dot-caller` agents): `Authorization: Bearer {{agentApiKey}}`\n- `/api/*` (used by the UI): `X-User-Id: {{userId}}` (no real auth yet)\n\n## Variables\n| name | set by |\n|---|---|\n| `baseUrl`, `agentApiKey`, `demoPhone` | environment (`demoPhone` is the seeded demo user) |\n| `userId` | *Get user context by phone* / *Get me* |\n| `taskId` | *Create task (new Idempotency-Key)* |\n| `idempotencyKey` | pre-request script on *Create task (new Idempotency-Key)* |\n| `updatedSince` | *List tasks (all, updatedSince)* |\n\n## Happy path\nRun the **Agent API** folder top to bottom (or use the Collection Runner). It looks up the user, creates a task, replays the idempotency key, posts call events, posts a result, checks that a second result gets 409, then creates and cancels a second task.\n\n`POST /api/session` returns 500 unless `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` are set in `backend/.env`. That is the only expected failure in a local run without LiveKit credentials.\n\n## Out of scope for this backend version\nNo SSE (`/api/stream`), since the UI polls `GET /api/tasks?updatedSince=\u2026`. No callback dispatch: `callbackStatus` stays `PENDING`, and there is no `/agent/tasks/:id/callback-status` endpoint yet.\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Agent API (/agent)",
+      "description": "Routes called by the `dot` voice agent and the `dot-caller` agent. Bearer auth.",
+      "item": [
+        {
+          "name": "Get user context by phone",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/users/by-phone/{{demoPhone}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "users",
+                "by-phone",
+                "{{demoPhone}}"
+              ]
+            },
+            "description": "Dot's inbound-call lookup: resolve a caller's E.164 phone to their user context (user, memories, active tasks, 10 most recent finished tasks). A leading `+` in the path is fine.\n\n**Saves `userId`** to the collection variables. 404 if no user has that phone."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "if (body.user && body.user.id) {",
+                  "  pm.collectionVariables.set('userId', body.user.id);",
+                  "  console.log('userId =', body.user.id);",
+                  "}",
+                  "",
+                  "pm.test('has context shape', () => {",
+                  "  const b = pm.response.json();",
+                  "  pm.expect(b).to.have.keys('user', 'memories', 'activeTasks', 'recentTasks');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get user context",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/users/{{userId}}/context",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "users",
+                "{{userId}}",
+                "context"
+              ]
+            },
+            "description": "Same payload as by-phone, keyed by user id. 404 if unknown."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create memory",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/users/{{userId}}/memories",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "users",
+                "{{userId}}",
+                "memories"
+              ]
+            },
+            "description": "Store a free-text memory for the user. Returns `201` with the `MemorySchema`. Memories show up (newest first) in the user context `memories` array.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"Prefers window seats\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('echoes text', () => pm.expect(pm.response.json().text).to.eql('Prefers window seats'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task (new Idempotency-Key)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "Queue a `RESERVATION_CALL` task. **`Idempotency-Key` header is required** (422 without it); the pre-request script generates a fresh UUID into `idempotencyKey` each time you send this.\n\n- `201` \u2192 new task created (status `QUEUED`)\n- `200` \u2192 the key matched an existing task for this user; the existing task is returned\n\n`payload.phone` must be E.164 and `payload.partySize` > 0 (422 otherwise). `callback` is stored but **not acted on** yet (`callbackStatus` stays `PENDING`).\n\n**Saves `taskId`.**",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "",
+                  "const body = pm.response.json();",
+                  "if (body.task && body.task.id) {",
+                  "  pm.collectionVariables.set('taskId', body.task.id);",
+                  "  console.log('taskId =', body.task.id);",
+                  "}",
+                  "",
+                  "pm.test('task is QUEUED', () => pm.expect(pm.response.json().task.status).to.eql('QUEUED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task (replay same Idempotency-Key)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "Re-sends with the *same* `idempotencyKey` as the last \"Create task (new Idempotency-Key)\" call. Should return `200` and the same task id \u2014 no duplicate row.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('same task id', () => pm.expect(pm.response.json().task.id).to.eql(pm.collectionVariables.get('taskId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get task (with events)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}"
+              ]
+            },
+            "description": "Task plus its event timeline (oldest first). With the worker running, a freshly created task moves to `RUNNING` within ~2s once it's claimed and `dot-caller` is dispatched."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('has events', () => pm.expect(pm.response.json().events).to.be.an('array'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post event: CALL_DIALING",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "events"
+              ]
+            },
+            "description": "Called by `dot-caller` to append to the task timeline. Returns `204 No Content`.\n\n`kind` is one of: `STATUS_CHANGED`, `CALL_DIALING`, `CALL_CONNECTED`, `TRANSCRIPT`, `NOTE`, `CALL_ENDED`, `CALLBACK_STARTED`, `CALLBACK_DELIVERED`, `ERROR`. `data` is optional free-form JSON.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"CALL_DIALING\",\n  \"message\": \"Dialing Luigi's...\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post event: CALL_CONNECTED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "events"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"CALL_CONNECTED\",\n  \"message\": \"Connected to Luigi's.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post event: TRANSCRIPT",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "events"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"TRANSCRIPT\",\n  \"message\": \"Agent: table for 2 at 6pm?\",\n  \"data\": {\n    \"speaker\": \"agent\",\n    \"text\": \"Hi, I'd like a table for 2 at 6pm.\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post event: NOTE",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "events"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"NOTE\",\n  \"message\": \"Host said patio is closed tonight.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post event: CALL_ENDED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/events",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "events"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"kind\": \"CALL_ENDED\",\n  \"message\": \"Call ended.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post result: CONFIRMED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/result",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "result"
+              ]
+            },
+            "description": "Called once by `dot-caller` when the call is done. Finishes the task:\n\n- `CONFIRMED`, `ALTERNATIVE_OFFERED` \u2192 `SUCCEEDED`\n- `UNAVAILABLE`, `NO_ANSWER`, `VOICEMAIL`, `ERROR` \u2192 `FAILED`\n\n**First result wins.** A second call (or a call on a canceled/finished task) returns `409`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"result\": {\n    \"outcome\": \"CONFIRMED\",\n    \"confirmedDateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"summary\": \"Booked a table for 2 at 6pm.\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('task SUCCEEDED', () => pm.expect(pm.response.json().task.status).to.eql('SUCCEEDED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post result again (expect 409)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/result",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "result"
+              ]
+            },
+            "description": "Simulates the caller agent's shutdown-hook safety net racing its normal path. Must be `409`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"result\": {\n    \"outcome\": \"UNAVAILABLE\",\n    \"summary\": \"Should never overwrite the first result.\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task (to cancel)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "The happy-path task above is already `SUCCEEDED`, so this makes a fresh one for the cancel request below. **Saves `taskId`.**",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "",
+                  "const body = pm.response.json();",
+                  "if (body.task && body.task.id) {",
+                  "  pm.collectionVariables.set('taskId', body.task.id);",
+                  "  console.log('taskId =', body.task.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel task",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "cancel"
+              ]
+            },
+            "description": "Cancel a `QUEUED` or `RUNNING` task \u2192 `CANCELED`. `409` if already final. In `DISPATCH_MODE=livekit` it also best-effort deletes the task's LiveKit room."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('task CANCELED', () => pm.expect(pm.response.json().task.status).to.eql('CANCELED'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "UI API (/api)",
+      "description": "Routes called by the web UI. `X-User-Id` header.",
+      "item": [
+        {
+          "name": "Get me",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "me"
+              ]
+            },
+            "description": "Returns `{ \"user\": UserSchema }` for the `X-User-Id` header. No real auth yet \u2014 one seeded demo user."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const body = pm.response.json();",
+                  "if (body.user && body.user.id) {",
+                  "  pm.collectionVariables.set('userId', body.user.id);",
+                  "  console.log('userId =', body.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update me",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "me"
+              ]
+            },
+            "description": "Partial update \u2014 any of `name`, `phone`, `timezone`, `callbackDefaults`. Omitted fields are unchanged. Returns `{ \"user\": UserSchema }`.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Chad Mustard\",\n  \"timezone\": \"America/Los_Angeles\",\n  \"callbackDefaults\": {\n    \"channel\": \"CALL\",\n    \"when\": \"ALWAYS\",\n    \"to\": \"{{demoPhone}}\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List tasks (active)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks?status=active",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tasks"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "active",
+                  "description": "active (QUEUED/RUNNING) | done (SUCCEEDED/FAILED/CANCELED) | all. Default: active"
+                }
+              ]
+            },
+            "description": "The UI polls this instead of SSE. Newest first."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List tasks (all, updatedSince)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks?status=all&updatedSince={{updatedSince}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tasks"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "all"
+                },
+                {
+                  "key": "updatedSince",
+                  "value": "{{updatedSince}}",
+                  "description": "ISO 8601 timestamp; only tasks with updatedAt strictly after this are returned"
+                }
+              ]
+            },
+            "description": "Cheap polling: pass the max `updatedAt` you've already seen as `updatedSince` to get only changed tasks.\n\nThe test script stores the newest `updatedAt` from the response into `updatedSince`, so sending this repeatedly behaves like a real poller (empty list when nothing changed). Clear the `updatedSince` variable to start over."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('updatedSince')) { pm.collectionVariables.set('updatedSince', '1970-01-01T00:00:00Z'); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "",
+                  "const tasks = pm.response.json().tasks;",
+                  "if (tasks.length) {",
+                  "  const newest = tasks.map(t => t.updatedAt).sort().pop();",
+                  "  pm.collectionVariables.set('updatedSince', newest);",
+                  "  console.log('updatedSince =', newest);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get task (with events)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks/{{taskId}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tasks",
+                "{{taskId}}"
+              ]
+            },
+            "description": "Same shape as the agent-side `GET /agent/tasks/:id` \u2014 task + event timeline."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "(setup) Create task via agent API",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "The UI can't create tasks (only Dot can), so this uses the agent route to make a fresh cancelable task. **Saves `taskId`.**",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "",
+                  "const body = pm.response.json();",
+                  "if (body.task && body.task.id) {",
+                  "  pm.collectionVariables.set('taskId', body.task.id);",
+                  "  console.log('taskId =', body.task.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel task",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks/{{taskId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tasks",
+                "{{taskId}}",
+                "cancel"
+              ]
+            },
+            "description": "User-initiated cancel from the UI. `409` if the task is already final. (Unlike the agent route, this one does not delete the LiveKit room.)"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create session (LiveKit token for Dot)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/session",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "session"
+              ]
+            },
+            "description": "Mints a LiveKit participant token for a new `session-<uuid>` room with the `dot` agent auto-dispatched via room config (metadata `{mode: \"SESSION\", userId}`).\n\nReturns `{ serverUrl, participantToken, roomName }`. **Requires `LIVEKIT_URL` / `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET`** to be set on the server."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('has token', () => pm.expect(pm.response.json()).to.have.keys('serverUrl', 'participantToken', 'roomName'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Edge cases & validation",
+      "description": "Negative tests from the plan's Review Focus list.",
+      "item": [
+        {
+          "name": "Create task without Idempotency-Key \u2192 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "The header is required; missing it must not silently create an un-deduplicatable task.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task with wrong bearer \u2192 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer not-the-key"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', () => pm.response.to.have.status(401));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task with no Authorization \u2192 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "FastAPI treats a missing required header as a validation error (422), not 401.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401 or 422', () => pm.expect(pm.response.code).to.be.oneOf([401, 422]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task with non-E.164 phone \u2192 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"415-555-2671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task with partySize 0 \u2192 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 0,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get unknown task \u2192 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/00000000-0000-0000-0000-000000000000",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "00000000-0000-0000-0000-000000000000"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get user by unknown phone \u2192 404",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/users/by-phone/+19998887777",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "users",
+                "by-phone",
+                "+19998887777"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List tasks with invalid status \u2192 422",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-User-Id",
+                "value": "{{userId}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/tasks?status=bogus",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "tasks"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "bogus"
+                }
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get me without X-User-Id \u2192 422",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "me"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create task for cancel test",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"type\": \"RESERVATION_CALL\",\n  \"title\": \"Table for 2 at Luigi's\",\n  \"payload\": {\n    \"businessName\": \"Luigi's\",\n    \"phone\": \"+14155552671\",\n    \"dateTime\": \"2026-10-01T18:00:00-07:00\",\n    \"partySize\": 2,\n    \"reservationName\": \"Chad\",\n    \"flexibilityMinutes\": 30,\n    \"notes\": \"Window seat if possible\"\n  },\n  \"callback\": {\n    \"channel\": \"NONE\",\n    \"when\": \"ON_SUCCESS\",\n    \"to\": null\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "",
+                  "const body = pm.response.json();",
+                  "if (body.task && body.task.id) {",
+                  "  pm.collectionVariables.set('taskId', body.task.id);",
+                  "  console.log('taskId =', body.task.id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel it \u2192 200",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "cancel"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel again \u2192 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "cancel"
+              ]
+            },
+            "description": ""
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Post result on canceled task \u2192 409",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{agentApiKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/agent/tasks/{{taskId}}/result",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "agent",
+                "tasks",
+                "{{taskId}}",
+                "result"
+              ]
+            },
+            "description": "",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"result\": {\n    \"outcome\": \"CONFIRMED\",\n    \"summary\": \"Too late.\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Meta",
+      "item": [
+        {
+          "name": "OpenAPI schema",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/openapi.json",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "openapi.json"
+              ]
+            },
+            "description": "The contract the agent teammate generates a Python client from. Operation ids are the route function names (`create_task`, `get_task`, \u2026)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Swagger UI",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/docs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "docs"
+              ]
+            },
+            "description": "Open in a browser for interactive docs."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "agentApiKey",
+      "value": "dev-agent-key"
+    },
+    {
+      "key": "demoPhone",
+      "value": "+14155550100"
+    },
+    {
+      "key": "userId",
+      "value": ""
+    },
+    {
+      "key": "taskId",
+      "value": ""
+    },
+    {
+      "key": "idempotencyKey",
+      "value": ""
+    },
+    {
+      "key": "updatedSince",
+      "value": ""
+    }
+  ]
+}

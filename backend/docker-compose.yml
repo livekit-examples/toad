@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: dots
+      POSTGRES_PASSWORD: dots
+      POSTGRES_DB: dots
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dots"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - dots_pg_data:/var/lib/postgresql/data
+
+volumes:
+  dots_pg_data:
