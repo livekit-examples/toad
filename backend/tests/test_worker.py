@@ -10,6 +10,7 @@ from dots_backend.models import Task, User
 from dots_backend.services import tasks as task_service
 from dots_backend.worker import handlers as _handlers  # noqa: F401
 from dots_backend.worker.main import process_one
+from dots_backend.worker.registry import _REGISTRY, register
 
 
 async def _make_user() -> uuid.UUID:
@@ -90,3 +91,36 @@ async def test_watchdog_fails_stale_running_task():
         task = await task_service.get_task(session, task_id)
     assert task.status == "FAILED"
     assert task.result["outcome"] == "ERROR"
+
+
+@pytest.mark.asyncio
+async def test_process_one_rolls_back_and_retries_when_handler_raises():
+    task_type = f"TEST_ALWAYS_FAILS_{uuid.uuid4().hex}"
+
+    async def _always_fails(task, ctx):
+        raise RuntimeError("boom")
+
+    register(task_type, _always_fails)
+    try:
+        user_id = await _make_user()
+        async with SessionLocal() as session:
+            task, _ = await task_service.create_task(
+                session, user_id=user_id, type_=task_type, title="t", payload=PAYLOAD,
+                callback={}, idempotency_key=str(uuid.uuid4()),
+            )
+            await session.commit()
+            task_id = task.id
+
+        dispatcher = FakeDispatcher()
+        claimed = await process_one(get_settings(), dispatcher)
+        assert claimed is True
+
+        async with SessionLocal() as session:
+            task = await task_service.get_task(session, task_id)
+            events = await task_service.list_events(session, task_id)
+
+        assert task.status == "QUEUED"
+        assert task.attempts == 1
+        assert any(e.kind == "ERROR" for e in events)
+    finally:
+        _REGISTRY.pop(task_type, None)
