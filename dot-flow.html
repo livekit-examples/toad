@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Dot Request Flow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Figtree:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: narration card with step controls on top, five system consoles below that light up as each step runs */
+:root {
+  --bg: #F3F5F9; --surface: #FFFFFF; --surface-2: #EDF0F6; --line: #DAE0EA;
+  --fg: #131A26; --muted: #5A6477; --faint: #8A93A4;
+  --accent: #2F5BFF; --accent-soft: #E4EAFF; --on-accent: #FFFFFF;
+  --run: #A86300; --run-soft: #FFF0D9;
+  --ok: #1D7F47; --ok-soft: #E0F3E7;
+  --console: #F8F9FC;
+  --font-display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --font-body: "Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0D1117; --surface: #151B24; --surface-2: #1C2330; --line: #29313F;
+  --fg: #E7EBF2; --muted: #97A1B2; --faint: #6B7587;
+  --accent: #7C97FF; --accent-soft: #1D294F; --on-accent: #0D1117;
+  --run: #F0B446; --run-soft: #37290F;
+  --ok: #4DC47F; --ok-soft: #12301F;
+  --console: #10151D;
+  color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0D1117; --surface: #151B24; --surface-2: #1C2330; --line: #29313F;
+  --fg: #E7EBF2; --muted: #97A1B2; --faint: #6B7587;
+  --accent: #7C97FF; --accent-soft: #1D294F; --on-accent: #0D1117;
+  --run: #F0B446; --run-soft: #37290F;
+  --ok: #4DC47F; --ok-soft: #12301F;
+  --console: #10151D;
+  color-scheme: dark; }
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.5; padding: 20px 16px 32px; }
+.shell { max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+.topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 10px; font-family: var(--font-display); font-weight: 700; font-size: 24px; letter-spacing: -0.01em; }
+.brand-dot { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); }
+.mock-tag { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); border: 1px dashed var(--line); padding: 2px 8px; border-radius: 999px; }
+
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px; gap: 2px; background: var(--surface); }
+.seg button { font: inherit; font-size: 12.5px; font-weight: 600; border: 0; background: none; color: var(--muted); padding: 5px 12px; border-radius: 999px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.seg-wrap { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+
+.narr { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+.narr-top { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.narr-text { min-width: 0; flex: 1 1 420px; display: flex; flex-direction: column; gap: 6px; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.narr h1 { margin: 0; font-family: var(--font-display); font-weight: 700; font-size: 28px; line-height: 1.15; letter-spacing: -0.01em; text-wrap: balance; }
+.narr p { margin: 0; color: var(--muted); max-width: 68ch; }
+.controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn { font: inherit; font-size: 14px; font-weight: 600; border-radius: 10px; padding: 9px 14px; cursor: pointer; border: 1px solid var(--line); background: var(--surface); color: var(--fg); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn:focus-visible, .seg button:focus-visible, .dotstep:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.track { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 6px; }
+.dotstep { font: inherit; border: 0; background: none; padding: 0; cursor: pointer; display: flex; flex-direction: column; gap: 6px; text-align: left; color: var(--faint); font-size: 11.5px; min-width: 0; }
+.dotstep i { height: 5px; border-radius: 3px; background: var(--surface-2); }
+.dotstep.past i { background: var(--accent); opacity: 0.45; }
+.dotstep.cur i { background: var(--accent); }
+.dotstep.cur { color: var(--fg); font-weight: 600; }
+.dotstep span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 700px) { .dotstep span { display: none; } }
+
+.chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-size: 12.5px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+
+.panes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.pane.db { grid-column: span 2; }
+@media (max-width: 900px) { .panes { grid-template-columns: 1fr; } .pane.db { grid-column: auto; } }
+.pane { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; display: flex; flex-direction: column; min-width: 0; transition: border-color 200ms ease, opacity 200ms ease; }
+.pane.dim { opacity: 0.6; }
+.pane.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); opacity: 1; }
+.pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.pane-head h2 { margin: 0; font-size: 14.5px; font-weight: 600; }
+.pane-head small { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+.pane-sub { font-size: 12px; color: var(--muted); }
+.log { background: var(--console); border-radius: 0 0 14px 14px; padding: 10px 14px 12px; font-family: var(--font-mono); font-size: 12px; line-height: 1.55; min-height: 150px; max-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: 3px; }
+.log .ln { color: var(--faint); overflow-wrap: anywhere; }
+.log .ln.new { color: var(--fg); }
+.log .ln.new::before { content: "› "; color: var(--accent); }
+.log .empty { color: var(--faint); font-style: italic; font-family: var(--font-body); }
+
+.dbwrap { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 12px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; min-width: 560px; }
+th { text-align: left; font-family: var(--font-mono); font-weight: 500; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+td { padding: 8px; font-family: var(--font-mono); border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+td.changed { background: var(--accent-soft); color: var(--accent); font-weight: 500; }
+.st { padding: 1px 7px; border-radius: 999px; font-size: 11.5px; }
+.st.q { background: var(--surface-2); color: var(--muted); }
+.st.r { background: var(--run-soft); color: var(--run); }
+.st.ok { background: var(--ok-soft); color: var(--ok); }
+.norow td { color: var(--faint); font-family: var(--font-body); font-style: italic; }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot" aria-hidden="true"></span>Dot request flow <span class="mock-tag">Mockup</span></div>
+    <div class="seg-wrap">UI updates by
+      <div class="seg" role="group" aria-label="How the UI hears about changes">
+        <button id="modeSse" aria-pressed="true">SSE push</button>
+        <button id="modePoll" aria-pressed="false">Polling</button>
+      </div>
+    </div>
+  </header>
+
+  <section class="narr" aria-live="polite">
+    <div class="narr-top">
+      <div class="narr-text">
+        <div class="eyebrow" id="eyebrow"></div>
+        <h1 id="title"></h1>
+        <p id="body"></p>
+      </div>
+      <div class="controls">
+        <button class="btn" id="prev">Back</button>
+        <button class="btn primary" id="next">Next step</button>
+        <button class="btn" id="play">Play</button>
+        <button class="btn" id="reset">Restart</button>
+      </div>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="track" id="track"></div>
+  </section>
+
+  <section class="panes">
+    <article class="pane" data-pane="ui"><div class="pane-head"><h2>Web UI</h2><small>browser</small></div><div class="log" id="log-ui"></div></article>
+    <article class="pane" data-pane="dot"><div class="pane-head"><h2>Dot agent</h2><small>agent_name=dot</small></div><div class="log" id="log-dot"></div></article>
+    <article class="pane" data-pane="backend"><div class="pane-head"><h2>Backend API + worker</h2><small>Node · Hono</small></div><div class="log" id="log-backend"></div></article>
+    <article class="pane" data-pane="caller"><div class="pane-head"><h2>Caller agent</h2><small>agent_name=dot-caller</small></div><div class="log" id="log-caller"></div></article>
+    <article class="pane db" data-pane="db">
+      <div class="pane-head"><h2>Postgres</h2><small>tasks · task_events</small></div>
+      <div class="dbwrap"><table><thead><tr><th>id</th><th>type</th><th>status</th><th>callback_status</th><th>result.outcome</th><th>events</th></tr></thead><tbody id="dbrow"></tbody></table></div>
+    </article>
+  </section>
+</div>
+
+<script>
+(() => {
+  const NAMES = { ui: 'Web UI', dot: 'Dot agent', backend: 'Backend', caller: 'Caller agent', db: 'Postgres' };
+  // Each step: who acts, what they log, and the task row after it.
+  const STEPS = [
+    { short: 'User asks', title: 'The user asks Dot for a reservation',
+      body: 'Audio goes from the browser into the LiveKit room. Dot transcribes it and the LLM picks the make_reservation_call tool with typed arguments.',
+      on: ['ui', 'dot'],
+      logs: {
+        ui: { sse: ['mic → room dot-chad-7f3 (WebRTC audio)'], poll: ['mic → room dot-chad-7f3 (WebRTC audio)'] },
+        dot: ['stt.final "Call Casa Nopal, table for six tonight at 6, call me back when it\'s confirmed"', 'llm → tool_call make_reservation_call', '  { business_name: "Casa Nopal", phone: "+529985550117", date_time: "2026-10-01T18:00-05:00", party_size: 6, reservation_name: "Chad" }'],
+      },
+      row: null },
+    { short: 'Hand-off', title: 'Dot hands the job to the backend',
+      body: 'The tool makes one HTTP call. The backend saves the task, puts a job on the queue and returns in milliseconds. Dot never waits on the reservation itself.',
+      on: ['dot', 'backend', 'db'],
+      logs: {
+        dot: ['POST /agent/tasks  Idempotency-Key: 4b1e9c', '  { userId: "usr_chad", type: "RESERVATION_CALL", title: "Table for 6 at Casa Nopal", payload: {…} }'],
+        backend: ['POST /agent/tasks → 201 in 14 ms', 'tasks.create → tsk_8f2c (QUEUED)', 'pg-boss.send("reservation_call", { taskId: "tsk_8f2c" })'],
+      },
+      row: { status: 'QUEUED', cb: 'PENDING', outcome: '—', events: 1, changed: ['status', 'cb', 'events'] } },
+    { short: 'Ack', title: 'Dot confirms out loud, and the UI shows the task',
+      body: 'The tool result comes back with the task id, so Dot can say it is on it. The UI learns about the new task on its own.',
+      on: ['dot', 'ui'],
+      logs: {
+        dot: ['tool_result { taskId: "tsk_8f2c", status: "QUEUED" }', 'tts "On it. I\'ll call Casa Nopal and call you back when they confirm."'],
+        ui: { sse: ['SSE task.created tsk_8f2c → card added: Queued'], poll: ['GET /api/tasks?status=active (every 3 s) → 1 new task', 'card added: Queued'] },
+      },
+      row: { status: 'QUEUED', cb: 'PENDING', outcome: '—', events: 1, changed: [] } },
+    { short: 'Worker', title: 'The worker picks up the job',
+      body: 'The worker is a separate process in the backend codebase. It marks the task running and asks LiveKit to start the caller agent, with the task in the dispatch metadata.',
+      on: ['backend', 'db', 'ui'],
+      logs: {
+        backend: ['worker: claimed reservation_call tsk_8f2c', 'tasks.transition(tsk_8f2c, RUNNING)', 'livekit.createDispatch("task-tsk_8f2c", "dot-caller",', '  { metadata: { taskId, type, payload, to: "+529985550117", maxDurationSec: 180 } })'],
+        ui: { sse: ['SSE task.updated → Running'], poll: ['GET /api/tasks?status=active → status Running'] },
+      },
+      row: { status: 'RUNNING', cb: 'PENDING', outcome: '—', events: 2, changed: ['status', 'events'] } },
+    { short: 'Dial', title: 'The caller agent dials the restaurant',
+      body: 'dot-caller joins its own room, reads the task from the job metadata and places an outbound SIP call.',
+      on: ['caller', 'backend', 'db'],
+      logs: {
+        caller: ['job received  room=task-tsk_8f2c', 'metadata → CallerMetadata (pydantic) ok', 'sip.create_sip_participant(to="+529985550117")', 'POST /agent/tasks/tsk_8f2c/events { kind: "CALL_DIALING" }'],
+        backend: ['POST /agent/tasks/tsk_8f2c/events → 204'],
+      },
+      row: { status: 'RUNNING', cb: 'PENDING', outcome: '—', events: 3, changed: ['events'] } },
+    { short: 'On call', title: 'The call happens, and the transcript streams to the UI',
+      body: 'The caller agent posts each turn as a TRANSCRIPT event. The backend stores it and forwards it, so the UI can show the call live.',
+      on: ['caller', 'backend', 'db', 'ui'],
+      logs: {
+        caller: ['participant connected  sip.callStatus=active', 'agent: "Hi, I\'m an AI assistant calling to book a table for Chad."', 'host: "We have 6:00 on the terrace. Name?"', 'POST …/events { kind: "TRANSCRIPT" } ×4'],
+        backend: ['POST /agent/tasks/tsk_8f2c/events → 204 ×5'],
+        ui: { sse: ['SSE task.event CALL_CONNECTED', 'SSE task.event TRANSCRIPT ×4 → live transcript'], poll: ['GET /api/tasks/tsk_8f2c (every 3 s) → 5 new events', 'live transcript, a few seconds behind'] },
+      },
+      row: { status: 'RUNNING', cb: 'PENDING', outcome: '—', events: 8, changed: ['events'] } },
+    { short: 'Result', title: 'The caller agent reports the result',
+      body: 'It always posts a result, even on voicemail or timeout. The first result wins; the backend marks the task finished.',
+      on: ['caller', 'backend', 'db', 'ui'],
+      logs: {
+        caller: ['POST /agent/tasks/tsk_8f2c/result', '  { outcome: "CONFIRMED", confirmedDateTime: "2026-10-01T18:00-05:00", summary: "Booked Casa Nopal tonight at 6:00 for 6 under Chad, on the terrace." }', 'session closed'],
+        backend: ['POST /agent/tasks/tsk_8f2c/result → 200', 'tasks.transition(tsk_8f2c, SUCCEEDED)'],
+        ui: { sse: ['SSE task.updated → Confirmed + summary'], poll: ['GET /api/tasks/tsk_8f2c → Confirmed + summary'] },
+      },
+      row: { status: 'SUCCEEDED', cb: 'PENDING', outcome: 'CONFIRMED', events: 10, changed: ['status', 'outcome', 'events'] } },
+    { short: 'Callback', title: 'The backend starts the callback',
+      body: 'The callback rule says to call the user. The backend dispatches Dot in CALLBACK mode, and Dot dials the user’s phone.',
+      on: ['backend', 'db', 'dot'],
+      logs: {
+        backend: ['callback: when=ALWAYS channel=CALL → dispatch', 'livekit.createDispatch("cb-tsk_8f2c", "dot",', '  { metadata: { mode: "CALLBACK", userId, taskId, to: "+13055550142", summary } })', 'tasks.setCallback(tsk_8f2c, IN_PROGRESS)'],
+        dot: ['job received  mode=CALLBACK', 'sip.create_sip_participant(to="+13055550142")'],
+      },
+      row: { status: 'SUCCEEDED', cb: 'IN_PROGRESS', outcome: 'CONFIRMED', events: 11, changed: ['cb', 'events'] } },
+    { short: 'Delivered', title: 'Dot tells the user, and the task is done',
+      body: 'Dot reads the summary on the call, then reports the callback as delivered. The UI moves the task to Completed.',
+      on: ['dot', 'backend', 'db', 'ui'],
+      logs: {
+        dot: ['tts "Good news: you\'re booked at Casa Nopal tonight at 6:00 for six, on the terrace."', 'POST /agent/tasks/tsk_8f2c/callback-status { status: "DELIVERED" }'],
+        backend: ['POST /agent/tasks/tsk_8f2c/callback-status → 204', 'tasks.setCallback(tsk_8f2c, DELIVERED)'],
+        ui: { sse: ['SSE task.updated → moved to Completed'], poll: ['GET /api/tasks?status=active → task gone; shown under Completed'] },
+      },
+      row: { status: 'SUCCEEDED', cb: 'DELIVERED', outcome: 'CONFIRMED', events: 12, changed: ['cb', 'events'] } },
+  ];
+
+  const $ = id => document.getElementById(id);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  let cur = 0, mode = 'sse', timer = null;
+
+  const linesFor = (step, pane) => {
+    const v = step.logs[pane]; if (!v) return [];
+    return Array.isArray(v) ? v : v[mode];
+  };
+  const stCls = s => s === 'QUEUED' || s === 'PENDING' ? 'q' : (s === 'RUNNING' || s === 'IN_PROGRESS') ? 'r' : 'ok';
+
+  function render() {
+    const s = STEPS[cur];
+    $('eyebrow').textContent = `Step ${cur + 1} of ${STEPS.length}`;
+    $('title').textContent = s.title;
+    $('body').textContent = s.body;
+    $('chips').innerHTML = s.on.map(p => `<span class="chip">${NAMES[p]}</span>`).join('');
+    $('track').innerHTML = STEPS.map((x, i) => `<button class="dotstep ${i < cur ? 'past' : i === cur ? 'cur' : ''}" data-i="${i}" aria-label="Step ${i + 1}: ${esc(x.short)}" ${i === cur ? 'aria-current="step"' : ''}><i></i><span>${i + 1}. ${esc(x.short)}</span></button>`).join('');
+    $('prev').disabled = cur === 0; $('next').disabled = cur === STEPS.length - 1;
+
+    ['ui', 'dot', 'backend', 'caller'].forEach(p => {
+      const out = [];
+      STEPS.slice(0, cur + 1).forEach((st, i) => linesFor(st, p).forEach(l => out.push(`<div class="ln ${i === cur ? 'new' : ''}">${esc(l)}</div>`)));
+      const el = $('log-' + p);
+      el.innerHTML = out.length ? out.join('') : '<div class="empty">Idle. Nothing has happened here yet.</div>';
+      el.scrollTop = el.scrollHeight;
+    });
+    document.querySelectorAll('.pane').forEach(el => {
+      const on = s.on.includes(el.dataset.pane);
+      el.classList.toggle('on', on); el.classList.toggle('dim', !on);
+    });
+    const r = s.row, c = f => r && r.changed.includes(f) ? ' class="changed"' : '';
+    $('dbrow').innerHTML = r
+      ? `<tr><td>tsk_8f2c</td><td>RESERVATION_CALL</td><td${c('status')}><span class="st ${stCls(r.status)}">${r.status}</span></td><td${c('cb')}><span class="st ${stCls(r.cb)}">${r.cb}</span></td><td${c('outcome')}>${r.outcome}</td><td${c('events')}>${r.events}</td></tr>`
+      : '<tr class="norow"><td colspan="6">No task yet. The row appears when Dot hands off the job.</td></tr>';
+  }
+
+  const go = i => { cur = Math.max(0, Math.min(STEPS.length - 1, i)); render(); };
+  const stop = () => { clearInterval(timer); timer = null; $('play').textContent = 'Play'; };
+  $('prev').addEventListener('click', () => { stop(); go(cur - 1); });
+  $('next').addEventListener('click', () => { stop(); go(cur + 1); });
+  $('reset').addEventListener('click', () => { stop(); go(0); });
+  $('play').addEventListener('click', () => {
+    if (timer) return stop();
+    if (cur === STEPS.length - 1) go(0);
+    $('play').textContent = 'Pause';
+    timer = setInterval(() => { if (cur >= STEPS.length - 1) return stop(); go(cur + 1); }, 3200);
+  });
+  $('track').addEventListener('click', e => { const b = e.target.closest('.dotstep'); if (b) { stop(); go(Number(b.dataset.i)); } });
+  document.addEventListener('keydown', e => {
+    if (e.target.closest('input, textarea')) return;
+    if (e.key === 'ArrowRight') { stop(); go(cur + 1); }
+    if (e.key === 'ArrowLeft') { stop(); go(cur - 1); }
+  });
+  const setMode = m => { mode = m; $('modeSse').setAttribute('aria-pressed', m === 'sse'); $('modePoll').setAttribute('aria-pressed', m === 'poll'); render(); };
+  $('modeSse').addEventListener('click', () => setMode('sse'));
+  $('modePoll').addEventListener('click', () => setMode('poll'));
+  render();
+})();
+</script>
+</body>
+</html>
