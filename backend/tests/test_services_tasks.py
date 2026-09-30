@@ -2,6 +2,7 @@ import asyncio
 import uuid
 
 import pytest
+from sqlalchemy import text
 
 from dots_backend.db import SessionLocal
 from dots_backend.models import User
@@ -96,6 +97,36 @@ async def test_first_result_wins_second_gets_conflict():
 
 
 @pytest.mark.asyncio
+async def test_set_result_returns_fresh_task_when_already_loaded_in_same_session():
+    # Regression test: set_result issues a raw-SQL UPDATE, so a Task object
+    # already loaded into this session's identity map (via get_task here)
+    # must not cause the post-update session.get() inside set_result to hand
+    # back stale, pre-update data.
+    user_id = await _make_user()
+    async with SessionLocal() as session:
+        task, _ = await task_service.create_task(
+            session, user_id=user_id, type_="RESERVATION_CALL", title="t", payload=PAYLOAD,
+            callback={}, idempotency_key=str(uuid.uuid4()),
+        )
+        await session.commit()
+        task_id = task.id
+
+    async with SessionLocal() as session:
+        preloaded = await task_service.get_task(session, task_id)
+        assert preloaded is not None
+        assert preloaded.status == "QUEUED"
+
+        result = {"outcome": "CONFIRMED", "summary": "Booked for 6pm."}
+        updated = await task_service.set_result(session, task_id, result)
+        await session.commit()
+
+        assert updated.status == "SUCCEEDED"
+        # Same identity-mapped instance as `preloaded`; it must reflect the
+        # update too, not the value it held before set_result ran.
+        assert preloaded.status == "SUCCEEDED"
+
+
+@pytest.mark.asyncio
 async def test_cancel_transitions_and_rejects_final_state():
     user_id = await _make_user()
     async with SessionLocal() as session:
@@ -138,11 +169,29 @@ async def test_retry_or_fail_backs_off_then_fails_after_three_attempts():
         if task.status == "FAILED":
             break
         assert task.status == "QUEUED"
-        # retry_or_fail schedules run_after with exponential backoff
-        # (2**attempts seconds); claim_task's queue query only picks up rows
-        # whose run_after has passed, so the next iteration's claim needs to
-        # wait out that backoff before it can reclaim this task.
-        await asyncio.sleep(2**task.attempts + 0.2)
+        # retry_or_fail schedules run_after with exponential backoff, and
+        # claim_task's queue query only picks up rows whose run_after has
+        # passed. Rather than sleeping out the real backoff, reset run_after
+        # directly so the next iteration's claim can pick the task back up
+        # immediately.
+        async with SessionLocal() as session:
+            await session.execute(
+                text("UPDATE tasks SET run_after = now() WHERE id = :task_id"),
+                {"task_id": task_id},
+            )
+            await session.commit()
 
     assert task.status == "FAILED"
     assert task.error == "boom"
+
+    async with SessionLocal() as session:
+        events = await task_service.list_events(session, task_id)
+    requeued_messages = [
+        event.message
+        for event in events
+        if event.kind == "STATUS_CHANGED" and event.message.startswith("Task requeued for retry")
+    ]
+    assert requeued_messages == [
+        "Task requeued for retry (attempt 1)",
+        "Task requeued for retry (attempt 2)",
+    ]

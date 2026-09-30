@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dots_backend.models import Task, TaskEvent
@@ -52,11 +53,11 @@ async def create_task(
         callback=callback,
         idempotency_key=idempotency_key,
     )
-    session.add(task)
     try:
-        await session.flush()
-    except Exception:
-        await session.rollback()
+        async with session.begin_nested():
+            session.add(task)
+            await session.flush()
+    except IntegrityError:
         existing = await session.execute(
             select(Task).where(Task.user_id == user_id, Task.idempotency_key == idempotency_key)
         )
@@ -88,7 +89,7 @@ async def claim_task(session: AsyncSession) -> Task | None:
     if row is None:
         return None
 
-    task = await session.get(Task, row.id)
+    task = await session.get(Task, row.id, populate_existing=True)
     assert task is not None
     await append_event(session, task.id, "STATUS_CHANGED", "Task claimed, now RUNNING")
     return task
@@ -120,7 +121,7 @@ async def set_result(session: AsyncSession, task_id: UUID, result: dict) -> Task
     if sql_result.first() is None:
         raise TaskResultConflict(f"task {task_id} already has a result or is in a final state")
 
-    task = await session.get(Task, task_id)
+    task = await session.get(Task, task_id, populate_existing=True)
     assert task is not None
     await append_event(session, task_id, "STATUS_CHANGED", f"Task finished as {new_status}")
     return task
@@ -141,7 +142,7 @@ async def cancel_task(session: AsyncSession, task_id: UUID) -> Task:
     if sql_result.first() is None:
         raise TaskAlreadyFinal(f"task {task_id} is already in a final state")
 
-    task = await session.get(Task, task_id)
+    task = await session.get(Task, task_id, populate_existing=True)
     assert task is not None
     await append_event(session, task_id, "STATUS_CHANGED", "Task canceled")
     return task
@@ -174,6 +175,12 @@ async def retry_or_fail(session: AsyncSession, task_id: UUID, *, error: str) -> 
             {"backoff": backoff_seconds, "task_id": task_id},
         )
         await append_event(session, task_id, "ERROR", error)
+        await append_event(
+            session,
+            task_id,
+            "STATUS_CHANGED",
+            f"Task requeued for retry (attempt {task.attempts})",
+        )
     else:
         await session.execute(
             text(
@@ -192,9 +199,9 @@ async def retry_or_fail(session: AsyncSession, task_id: UUID, *, error: str) -> 
     # work: the `task` object fetched at the top of this function is already
     # in the session's identity map, so a plain session.get() below would
     # return that stale (pre-update) instance instead of querying again.
-    # Expire it so the next get() re-fetches the row's current state.
-    session.expire(task)
-    refreshed = await session.get(Task, task_id)
+    # populate_existing=True forces a re-query that overwrites the cached
+    # instance's attributes with the row's current state.
+    refreshed = await session.get(Task, task_id, populate_existing=True)
     assert refreshed is not None
     return refreshed
 
@@ -223,7 +230,7 @@ async def fail_stale_running(session: AsyncSession) -> list[Task]:
     for task_id in ids:
         await append_event(session, task_id, "ERROR", "Watchdog: task exceeded max duration")
         await append_event(session, task_id, "STATUS_CHANGED", "Task failed by watchdog")
-        task = await session.get(Task, task_id)
+        task = await session.get(Task, task_id, populate_existing=True)
         assert task is not None
         tasks.append(task)
     return tasks
